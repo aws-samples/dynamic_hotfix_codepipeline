@@ -13,6 +13,7 @@ A [Gitflow](https://www.atlassian.com/git/tutorials/comparing-workflows/gitflow-
 
 `main` → QA → Stage(Pre-Production) → Production environments 
 
+</n>
 
 > Note: Please follow the AWS Prescriptive Guidance for further instructions on how to use the code sample
 
