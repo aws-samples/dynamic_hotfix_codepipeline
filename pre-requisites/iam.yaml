@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Complete IAM role CloudFormation template
+Parameters:
+  ApplicationName:
+    Description: Application name to be deployed.
+    Type: String
+  ToolsAccount:
+    Description: AWS AccountNumber for Tools Account
+    Type: Number
+  DepRegion:
+    Description: Region used for deployment
+    Type: String
+    
+Resources:
+  CloudFormationRole:
+    Type: 'AWS::IAM::Role'
+    Metadata:
+     cfn_nag:
+      rules_to_suppress:
+       - id: W28
+         reason: "Resource names are constructed using application name parameter for tracking"  
+    Properties:
+      RoleName: !Sub "${ApplicationName}-codepipeline-role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${ToolsAccount}:root'
+            Action: 'sts:AssumeRole'
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/AWSCloudFormationFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonECS_FullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess'
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+      Policies:
+        - PolicyName: inline-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: VisualEditor1
+                Effect: Allow
+                Action: 'iam:PassRole'
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:*"
+                Condition:
+                  StringEqualsIfExists:
+                    'iam:PassedToService':
+                      - cloudformation.amazonaws.com
+                      - ecs-tasks.amazonaws.com
+        - PolicyName: kms-policy
+          PolicyDocument:
+            Statement:
+              - Sid: VisualEditor2
+                Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                  - 'kms:Encrypt'
+                  - 'kms:GenerateDataKeyPair'
+                Resource: !Sub 'arn:aws:kms:${DepRegion}:*:*'
+        - PolicyName: ec2-policy
+          PolicyDocument:
+            Statement:
+              - Sid: VisualEditor3
+                Effect: Allow
+                Action:
+                  - 'ec2:RevokeSecurityGroupIngress'
+                  - 'ec2:AuthorizeSecurityGroupEgress'
+                  - 'ec2:AuthorizeSecurityGroupIngress'
+                  - 'ec2:UpdateSecurityGroupRuleDescriptionsEgress'
+                  - 'ec2:CreateSecurityGroup'
+                  - 'ec2:GetSecurityGroupsForVpc'
+                  - 'ec2:RevokeSecurityGroupEgress'
+                  - 'ec2:DeleteSecurityGroup'
+                  - 'ec2:ModifySecurityGroupRules'
+                  - 'ec2:ApplySecurityGroupsToClientVpnTargetNetwork'
+                  - 'ec2:UpdateSecurityGroupRuleDescriptionsIngress'           
+                Resource: !Sub 'arn:aws:ec2:${DepRegion}:${AWS::AccountId}:security-group/*'
+        - PolicyName: ec2-describe
+          PolicyDocument:
+            Statement:
+              - Sid: VisualEditor4
+                Effect: Allow
+                Action:
+                  - 'ec2:DescribeSecurityGroupRules'
+                  - 'ec2:DescribeSecurityGroupReferences'
+                  - 'ec2:DescribeSecurityGroups'
+                  - 'ec2:DescribeStaleSecurityGroups'          
+                Resource: !Sub 'arn:aws:ec2:${DepRegion}:${AWS::AccountId}:security-group/*'
+        - PolicyName: iam-policy
+          PolicyDocument:
+            Statement:
+              - Sid: VisualEditor5
+                Effect: Allow
+                Action:
+                  - 'iam:CreateRole'
+                  - 'iam:GetRole'
+                  - 'iam:PutRolePolicy'
+                  - 'iam:AttachRolePolicy'
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:*'

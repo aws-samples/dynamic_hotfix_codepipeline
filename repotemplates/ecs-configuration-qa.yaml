@@ -1,0 +1,7 @@
+{
+  "Parameters": {
+   "Environment" : "qa",
+   "ApplicationName" : "hotfixpoc",
+   "RegistryAccountid" : "<qaaccountnumber>"
+ }
+}

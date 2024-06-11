@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Template that creates Service Catalog Portfolio and Products for Codepipline
+
+Parameters: 
+  TemplateBucket:
+     Type: String
+     Description: S3 bucket that contains the packaged cloudformation stack for product creation
+
+Resources:  
+  MainPipelinePortfolio: 
+    Type: "AWS::ServiceCatalog::Portfolio"
+    Properties:
+      AcceptLanguage: en
+      Description: Portfolio for main and develop pipeline
+      DisplayName: Main Pipeline Portfolio 
+      ProviderName: AWS
+
+  MainProductforPipeline:
+    Type: "AWS::ServiceCatalog::CloudFormationProduct"
+    Properties:
+      AcceptLanguage: en
+      Description: Main Product CICD Pipeline for develop and main branch
+      Owner: AWS
+      Name: Main CICD Pipeline
+      ProvisioningArtifactParameters:
+        -
+          Description: Main Product CICD Pipeline
+          Name: 1.0.0
+          Info:
+            LoadTemplateFromURL: !Sub "https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/pipeline-main.yaml"        
+
+  HotfixPipelinePortfolio: 
+    Type: "AWS::ServiceCatalog::Portfolio"
+    Properties:
+      AcceptLanguage: en
+      Description: Portfolio for hotfix pipeline
+      DisplayName: Hotfix Pipeline Portfolio 
+      ProviderName: AWS
+
+  HotfixProductforPipeline:
+    Type: "AWS::ServiceCatalog::CloudFormationProduct"
+    Properties:
+      AcceptLanguage: en
+      Description: CICD Pipeline for hotfix branch
+      Owner: AWS
+      Name: Hotfix CICD Pipeline
+      ProvisioningArtifactParameters:
+        -
+          Description: Hotfix Product CICD Pipeline
+          Name: 1.0.0
+          Info:
+            LoadTemplateFromURL: !Sub "https://${TemplateBucket}.s3.${AWS::Region}.amazonaws.com/pipeline-hotfix.yaml"        
+
+#IAM Role
+  SCCodepipelineLaunchRole:
+    Type: 'AWS::IAM::Role'
+    Metadata:
+     cfn_nag:
+      rules_to_suppress:
+       - id: F38
+         reason: "Permissions to PassRole is required to access dynamic roles that will be created. Trust is already restricted to Servicecatalog service"
+       - id: W11
+         reason: "Resources will be created dynamically for multiple applications so it allowed for all resources"
+       - id: W28
+         reason: "Resource names are constructed using application name parameter for tracking"            
+    Properties:
+      RoleName: SCECSLaunchRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodePipeline_FullAccess
+        - arn:aws:iam::aws:policy/AWSCodeCommitFullAccess
+        - arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
+        - arn:aws:iam::aws:policy/AmazonECS_FullAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - servicecatalog.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: SCLaunchPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: SCLaunchPolicySID
+                Effect: Allow
+                Action:                  
+                  - "servicecatalog:ListServiceActionsForProvisioningArtifact"
+                  - "servicecatalog:ExecuteprovisionedProductServiceAction"
+                  - "iam:AddRoleToInstanceProfile"
+                  - "iam:ListRolePolicies"
+                  - "iam:ListPolicies"
+                  - "iam:DeleteRole"
+                  - "iam:GetRole"
+                  - "iam:CreateInstanceProfile"
+                  - "iam:PassRole"
+                  - "iam:DeleteInstanceProfile"
+                  - "iam:ListRoles"
+                  - "iam:RemoveRoleFromInstanceProfile"
+                  - "iam:CreateRole"
+                  - "iam:DetachRolePolicy"
+                  - "iam:AttachRolePolicy"
+                  - "iam:GetRolePolicy"
+                  - "iam:PutRolePolicy"
+                  - "iam:DeleteRolePolicy"
+                  - "cloudformation:DescribeStackResource"
+                  - "cloudformation:DescribeStackResources"
+                  - "cloudformation:GetTemplate"
+                  - "cloudformation:List*"
+                  - "cloudformation:DescribeStackEvents"
+                  - "cloudformation:DescribeStacks"
+                  - "cloudformation:CreateStack"
+                  - "cloudformation:DeleteStack"
+                  - "cloudformation:DescribeStackEvents"
+                  - "cloudformation:DescribeStacks"
+                  - "cloudformation:GetTemplateSummary"
+                  - "cloudformation:SetStackPolicy"
+                  - "cloudformation:ValidateTemplate"
+                  - "cloudformation:UpdateStack"               
+                Resource: 
+                - "*"
+  
+  AssociatePortfolioProductMain:
+    Type: "AWS::ServiceCatalog::PortfolioProductAssociation"
+    Properties:
+      PortfolioId: !Ref MainPipelinePortfolio
+      ProductId: !Ref MainProductforPipeline
+
+  AssociatePortfolioProductHotfix:
+    Type: "AWS::ServiceCatalog::PortfolioProductAssociation"
+    Properties:
+      PortfolioId: !Ref HotfixPipelinePortfolio
+      ProductId: !Ref HotfixProductforPipeline
+
+  MainPortfolioConstraint:
+    Type: AWS::ServiceCatalog::LaunchRoleConstraint
+    DependsOn:
+         - "AssociatePortfolioProductMain"
+    Properties:
+      Description: Launch Constraint for main pipeline product
+      PortfolioId: !Ref MainPipelinePortfolio
+      ProductId: !Ref MainProductforPipeline
+      RoleArn: !GetAtt [SCCodepipelineLaunchRole, Arn]
+
+  HotfixPortfolioConstraint:
+    Type: AWS::ServiceCatalog::LaunchRoleConstraint
+    DependsOn:
+         - "AssociatePortfolioProductHotfix"
+    Properties:
+      Description: Launch Constraint for hotfix pipeline product
+      PortfolioId: !Ref HotfixPipelinePortfolio
+      ProductId: !Ref HotfixProductforPipeline
+      RoleArn: !GetAtt [SCCodepipelineLaunchRole, Arn]
+
+  ProdIdSSM:
+      Type: AWS::SSM::Parameter
+      Properties:
+        Name: /sc/productartifactid
+        Type: String
+        Value: !GetAtt [HotfixProductforPipeline,ProvisioningArtifactIds]
+
+  PortfolioIdSSM:
+      Type: AWS::SSM::Parameter
+      Properties:
+        Name: /sc/productid
+        Type: String
+        Value: !Ref HotfixProductforPipeline
+
+Outputs:
+  MainProductId:
+    Value: !Ref MainProductforPipeline
+    Description: "Service Catalog Product Id for Main pipeline product"
+  MainPorfolioId:
+    Value: !Ref MainPipelinePortfolio
+    Description: "Service Catalog Portfolio Id for Main pipeline product"
+  MainProductArtifactId:
+    Value: !GetAtt [MainProductforPipeline,ProvisioningArtifactIds]
+    Description: "Service Catalog Product Artifact Id for Main pipeline product"
+  HotFixProductId:
+    Value: !Ref HotfixProductforPipeline
+    Description: "Service Catalog Product Id for Hotfix pipeline product"
+  HotFixPorfolioId:
+    Value: !Ref HotfixPipelinePortfolio
+    Description: "Service Catalog Portfolio Id for Hotfix pipeline product"
+  HotFixProductArtifactId:
+    Value: !GetAtt [HotfixProductforPipeline,ProvisioningArtifactIds]
+    Description: "Service Catalog Product Artifact Id for Hotfix pipeline product"     
