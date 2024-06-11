@@ -2,7 +2,7 @@
 
 This pattern describes how to deploy a hot-fix to a production environment securely using dynamic pipelines. A hot-fix is typically deployed to address critical or security issues reported in a live environment, such as Production.
 
-This pattern helps address a scenario of managing a dynamic hot-fix AWS CodePipeline dedicated solely to deploying hot-fixes. The  hot-fix pipeline is automatically created when a hot-fix branch is created and terminated when the hot-fix branch is deleted. The solution is implemented using an AWS Service Catalog Product, which is launched or terminated based on an Amazon EventBridge rule. The AWS CodePipeline can deploy the application only once. This restriction is enforced within the AWS CodePipeline stage using a custom AWS Lambda function (Pull Request Setup).
+This pattern helps address a scenario of managing a dynamic hot-fix AWS CodePipeline dedicated solely to deploying hot-fixes. The  hot-fix pipeline is automatically created when a hotfix branch is created and deleted when the hotfix branch is deleted. The solution is implemented using an AWS Service Catalog Product, which is launched or terminated based on an Amazon EventBridge rule. The AWS CodePipeline can deploy the application only once. This restriction is enforced within the AWS CodePipeline stage using a custom AWS Lambda function (Pull Request Setup).
 
 This pattern is designed for environments with the following setup:
 
