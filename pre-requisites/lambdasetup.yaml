@@ -1,0 +1,517 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Template to create Lambda functions - Eventbridge rule setup for provisioning and terminating Hotfix Service Catalog Product and PR Creation
+Parameters:
+  ProductArtifactID:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /sc/productartifactid
+
+  ProductID:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /sc/productid
+    
+  ProdAccount:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /parameter/prodaccount
+    
+  StageAccount:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /parameter/stageaccount
+    
+  ToolsAccount:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /parameter/toolsaccount
+  
+Resources:
+  PRLambdaInvokePermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !Ref PRCreation
+        Action: 'lambda:InvokeFunction'
+        Principal: codepipeline.amazonaws.com
+        SourceArn: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:*"
+    
+  PRCreationExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+     cfn_nag:
+      rules_to_suppress:
+       - id: W28
+         reason: "Resource names are constructed using application name parameter for tracking"    
+    Properties:
+      RoleName: prcreation-lambda-execution-role             
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/AWSCodeCommitPowerUser
+        - arn:aws:iam::aws:policy/AWSCodePipelineCustomActionAccess
+        
+  PRCreation:
+    Type: AWS::Lambda::Function
+    Metadata:
+     cfn_nag:
+      rules_to_suppress:
+       - id: W89
+         reason: "Lambda function does not has any execute confidential code"
+       - id: W28
+         reason: "Resource names are constructed using application name parameter for tracking"
+       - id: W92
+         reason: "ReservedConcurrentExecutions is not defined as the lambda execution at default limits are sufficient"               
+    Properties:
+      FunctionName:  prcreation-lambda
+      Handler: index.lambda_handler
+      Role: !GetAtt PRCreationExecutionRole.Arn
+      Runtime: python3.11
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+            
+          logging = logging.getLogger()
+          logging.setLevel("INFO")
+
+          def create_pull_request_codecommit (codepipeline_client,codecommitclient, prparameters, targetbranch ):
+              logging.info(f'Parameters passed for PR request: {prparameters}')
+              PRTitle = prparameters["Title"]
+              PRDescription = prparameters["Description"]
+              ClientRequestToken = prparameters["ClientToken"]+targetbranch
+              RepositoryName = prparameters["Repository"]
+              SourceReference = prparameters["Sourcebranch"]
+
+              logging.info(f'Creating PR request for branch: {targetbranch}')
+              try:
+                  response = codecommitclient.create_pull_request(
+                      title=PRTitle,
+                      description=PRDescription,
+                      targets=[
+                          {
+                              'repositoryName': RepositoryName,
+                              'sourceReference': SourceReference,
+                              'destinationReference': targetbranch
+                          },
+                      ],
+                      clientRequestToken=ClientRequestToken
+                  )
+                  logging.info(f'Response for PR request creation  {response}')
+                  return True
+              except Exception as E:
+                  logging.error(f'Error in execution {E}')
+                  return False
+                    
+          def lambda_handler (event, context):
+            codecommit_client = boto3.client('codecommit')
+            codepipeline_client = boto3.client('codepipeline')
+            job_id = event['CodePipeline.job']['id']
+            logging.info(f'job_id: {job_id}')
+            statusflag=True 
+
+            try:
+                user_parameters = event['CodePipeline.job']['data']['actionConfiguration']['configuration']['UserParameters']
+                decoded_parameters = json.loads(user_parameters)
+                if create_pull_request_codecommit(codepipeline_client,codecommit_client,decoded_parameters,"develop"):
+                  logging.info(f'Successfully created PR for branch develop')
+                else:
+                  logging.error(f'Failure in creating PR for branch develop')
+                  statusflag=False
+                  
+                if create_pull_request_codecommit(codepipeline_client,codecommit_client,decoded_parameters,"main"):
+                  logging.info(f'Successfully created PR for branch main')
+                else:
+                  logging.error(f'Failure in creating PR for branch main')
+                  statusflag=False
+
+                if statusflag:
+                  logging.info(f'PR creation function completed successfully')
+                  codepipeline_client.put_job_success_result(jobId=job_id,executionDetails={'summary': 'Successfully created PR for branches develop and main'})
+                else:
+                  logging.error(f'PR creation function failed')
+                  codepipeline_client.put_job_failure_result(jobId=job_id, failureDetails={'message':"PR Creation failed. Check Lambda logs for more information",'type': 'JobFailed'})
+
+            except Exception as E:
+                logging.error(f'Error in execution {E}')
+                codepipeline_client.put_job_failure_result(jobId=job_id, failureDetails={'message': E, 'type': 'JobFailed'})
+
+  HotfixEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: hotfix-event-rule
+      Targets:
+        - Arn: !GetAtt HotfixLambda.Arn
+          Id: HotfixLambda
+      EventPattern:
+        detail-type:
+        - CodeCommit Repository State Change
+        source:
+        - aws.codecommit
+        detail:
+          referenceType:
+          - branch
+          event:
+          - referenceCreated
+          referenceName:
+          - prefix: hotfix-
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HotfixLambda
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+          - HotfixEventRule
+          - Arn
+  
+  HotfixLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+     cfn_nag:
+      rules_to_suppress:
+       - id: W28
+         reason: "Resource names are constructed using application name parameter for tracking"     
+    Properties:
+      RoleName: hotfix-lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+      - PolicyName: LambdaPermissions
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Sid: LambdaS3Permissions
+            Effect: Allow
+            Action:
+            - s3:Create*
+            - s3:Get*
+            - s3:Put*
+            - s3:Delete*
+            - s3:Update*
+            Resource: !Sub 'arn:aws:s3:::*'  
+          - Sid: LambdaSSMPermissions
+            Effect: Allow
+            Action:
+            - 'ssm:GetParameters'  
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:*'    
+          - Sid: LambdaKMSPermissions
+            Effect: Allow
+            Action:  
+            - kms:Decrypt
+            - kms:Encrypt
+            - kms:GenerateDataKey  
+            Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:*'
+          - Sid: LambdaSCPermissions
+            Effect: Allow
+            Action:  
+            - servicecatalog:SearchProvisionedProducts
+            - servicecatalog:GetProvisionedProductOutputs
+            - servicecatalog:TerminateProvisionedProduct
+            Resource: !Sub 'arn:aws:servicecatalog:${AWS::Region}:${AWS::AccountId}:*'               
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSServiceCatalogEndUserFullAccess
+        - arn:aws:iam::aws:policy/AmazonEventBridgeFullAccess
+  
+  HotfixLambda:
+    Type: AWS::Lambda::Function
+    Metadata:
+     cfn_nag:
+      rules_to_suppress:
+       - id: W89
+         reason: "Lambda function does not has any execute confidential code"
+       - id: W28
+         reason: "Resource names are constructed using application name parameter for tracking"
+       - id: W92
+         reason: "ReservedConcurrentExecutions is not defined as the lambda execution at default limits are sufficient"       
+    Properties:
+      FunctionName: hotfix-lambda-function
+      Handler: index.handler
+      Role: !GetAtt HotfixLambdaExecutionRole.Arn
+      Timeout: 300
+      Runtime: python3.11
+      Environment:
+        Variables:
+          ProductID: !Ref ProductID
+          ProductArtifactID: !Ref ProductArtifactID
+          ProdAccount: !Ref ProdAccount
+          ToolsAccount: !Ref ToolsAccount
+          StageAccount: !Ref StageAccount
+          
+      Code:
+        ZipFile: |
+            import boto3
+            import json
+            import os
+            import logging
+            
+            logging = logging.getLogger()
+            logging.setLevel("INFO")
+
+            def handler(event, context):
+                try:
+                    logging.info(f' Input Event {event}')
+                    # Initialize AWS Service Catalog client
+                    sc_client = boto3.client('servicecatalog')
+                    branch_name = event['detail']['referenceName']
+                    branch = event['detail']['referenceName']
+                    repository = event['detail']['repositoryName']
+
+                    
+                    logging.info(f'Repository - {repository} , Branch - {branch}')
+                    
+
+                    # Check if the branch name matches the pattern "hotfix-*"
+                    if branch_name.startswith('hotfix-'):
+                        logging.info(f'Branch Starts with Hotfix prefix')
+                        provisioned_product_name = f'Hotfix-{repository}-{branch}'
+                        logging.info(f'Provisioned Product Name {provisioned_product_name}')
+                        # Search All Service Catalog Provisioned Products to check for this branch and repository in tags
+                        
+                        logging.info(f'Provisioned Product Name: {provisioned_product_name}')
+                        response = sc_client.search_provisioned_products(
+                            AccessLevelFilter={'Key': 'Account', 'Value': 'self'},
+                            Filters={
+                                'SearchQuery': ['name:'+provisioned_product_name]
+                            }
+                        )
+
+                        logging.info(f'Output of search_provisioned_products - {response}')
+
+                        provisioned_products = response.get('ProvisionedProducts', [])
+
+
+                        if provisioned_products:
+                            logging.info(f"Provisioned Product already present in the account")
+                            logging.info(f"Provisioned Product Name: {provisioned_products[0]['Name']} with id {provisioned_products[0]['Id']}")
+                            
+                            return {
+                                'statusCode': 200,
+                                'body': json.dumps(f"Provisioned Product Name: {provisioned_products[0]['Name']} with id {provisioned_products[0]['Id']}")
+                            }
+                        
+                        else:
+                            
+                            logging.info(f'Getting Product ID and Provisioning Artifact Id from Environment Variables')
+                            product_id = os.environ['ProductID']
+                            provisioning_artifact_id = os.environ['ProductArtifactID']
+                            
+                            logging.info(f'Product ID: {product_id} , ProvisioningArtifactId: {provisioning_artifact_id}')
+                    
+                            # Create a provisioned product request
+                            provisioned_product_request = {
+                                'ProductId': product_id,
+                                'ProvisionedProductName': provisioned_product_name,
+                                'ProvisioningArtifactId': provisioning_artifact_id,
+                                'ProvisioningParameters': [
+                                    {
+                                        'Key': 'ApplicationName',
+                                        'Value': repository.split('-')[0]
+                                    },
+                                    {
+                                        'Key': 'CodecommitBranchName',
+                                        'Value': branch
+                                    },
+                                    {
+                                        'Key': 'CodeCommitRepoName',
+                                        'Value': repository
+                                    },
+                                    {
+                                        'Key': 'ECRRepository',
+                                        'Value': repository.split('-')[0] + "-app"
+                                    },
+                                    {
+                                        'Key': 'ProdAccount',
+                                        'Value': os.environ['ProdAccount'] ## Put it env variable to fetch from SSM.
+                                    },
+                                    {
+                                        'Key': 'StageAccount',
+                                        'Value': os.environ['StageAccount']
+                                    },
+                                    {
+                                        'Key': 'ToolsAccount',
+                                        'Value': os.environ['ToolsAccount']
+                                    },
+                                    
+                                    # Add more parameters as needed
+                                ]
+                            }
+                            
+                            logging.info(f'Parameters to be added in Create Provisioned product request: {provisioned_product_request}')
+
+                                
+                            # Create the Service Catalog provisioned product
+                            response = sc_client.provision_product(
+                                        ProvisionedProductName=provisioned_product_name,
+                                        ProductId=product_id,
+                                        ProvisioningArtifactId=provisioning_artifact_id,
+                                        ProvisioningParameters=provisioned_product_request['ProvisioningParameters']
+                                    )
+                                    
+                            logging.info(f'Provision Product Response: {response}')
+                            return {
+                                'statusCode': 200,
+                                'body': json.dumps('Provisioning successful')
+                            }
+                    else:
+                        return {
+                            'statusCode': 200,
+                            'body': json.dumps('Branch does not match the pattern')
+                        }
+                except Exception as e:
+                    print('Error:', str(e))
+                    return {
+                        'statusCode': 500,
+                        'body': json.dumps('Error: ' + str(e))
+                    }
+
+
+
+  HotfixCleanupEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: hotfix-cleanup-event-rule
+      Targets:
+        - Arn: !GetAtt HotfixCleanupLambda.Arn
+          Id: HotfixCleanupLambda
+      EventPattern:
+        detail-type:
+        - CodeCommit Repository State Change
+        source:
+        - aws.codecommit
+        detail:
+          referenceType:
+          - branch
+          event:
+          - referenceDeleted
+          referenceName:
+          - prefix: hotfix-
+
+  LambdaHotFixCleanupInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HotfixCleanupLambda
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HotfixCleanupEventRule.Arn          
+
+  HotfixCleanupLambda:
+    Type: AWS::Lambda::Function
+    Metadata:
+     cfn_nag:
+      rules_to_suppress:
+       - id: W89
+         reason: "Lambda function does not has any execute confidential code"
+       - id: W28
+         reason: "Resource names are constructed using application name parameter for tracking"
+       - id: W92
+         reason: "ReservedConcurrentExecutions is not defined as the lambda execution at default limits are sufficient"       
+    Properties:
+      FunctionName: hotfix-cleanup-lambda-function
+      Handler: index.handler
+      Role: !GetAtt HotfixLambdaExecutionRole.Arn
+      Timeout: 300
+      Runtime: python3.11
+      Environment:
+        Variables:
+          ProductID: !Ref ProductID
+          ProductArtifactID: !Ref ProductArtifactID
+      Code:
+        ZipFile: |
+            import boto3
+            import json
+            import os
+            import logging
+            
+            logging = logging.getLogger()
+            logging.setLevel("INFO")
+
+            def handler(event, context):
+                try:
+                    logging.info(f' Input Event {event}')
+                    # Initialize AWS boto3 clients
+                    sc_client = boto3.client('servicecatalog')
+                    f_client = boto3.client('cloudformation')
+                    
+                    # Check if the branch name matches the pattern "hotfix-*"
+                    branch_name = event['detail']['referenceName']
+                    branch = event['detail']['referenceName']
+                    repository = event['detail']['repositoryName']
+                    
+                    logging.info(f'Repository - {repository} , Branch - {branch}')
+
+
+                    if branch_name.startswith('hotfix-'):              
+                        logging.info(f'Branch Starts with Hotfix prefix')
+                        provisioned_product_name = f'Hotfix-{repository}-{branch}'
+                        logging.info(f'Provisioned Product Name: {provisioned_product_name}')
+                        
+                        logging.info(f'Check if provisioned product exists')
+                        response = sc_client.search_provisioned_products(
+                            AccessLevelFilter={'Key': 'Account', 'Value': 'self'},
+                            Filters={
+                                'SearchQuery': ['name:'+provisioned_product_name]
+                            }
+                        )
+                        
+                        logging.info(f'Output of search_provisioned_products - {response}')
+
+                        # Extract and print the provisioned products
+                        provisioned_products = response.get('ProvisionedProducts', [])
+                        if provisioned_products:
+                            pp_id = response['ProvisionedProducts'][0]['Id']
+                            logging.info(f'Found Provisioned Product')
+                            logging.info(f'provisioned product id: {pp_id}')
+                        
+                        # Describe pp_id and get the CloudFormation Stack Arn
+                        if pp_id:
+                            logging.info(f'Get CloudFormation Stack ARN from provisioned product id')
+                            response = sc_client.get_provisioned_product_outputs(
+                                ProvisionedProductId=pp_id,
+                                OutputKeys=[
+                                    'CloudformationStackARN',
+                                ]
+                            )
+                        
+                            stack_arn = response['Outputs'][0]['OutputValue']
+                            logging.info(f'Stack ARN: {stack_arn}')
+                          
+                            # List Resources of the stack
+                            cf_client = boto3.client('cloudformation')
+                            logging.info(f'Getting stack resources from the Provisioned Product CloudFormation')
+                            stack_resources = cf_client.list_stack_resources(StackName=stack_arn)
+
+                            # From all the stack resources check for logical id - Pipeline 
+                            for resource in stack_resources['StackResourceSummaries']:
+                                if resource['LogicalResourceId'] == 'CodePipelinePipeline':
+                                    # Get the physical id
+                                    logging.info(f'Getting Pipeline ID from the stack')
+                                    pipeline_id = resource['PhysicalResourceId']
+                                    logging.info(f'Pipeline ID: {pipeline_id}')
+                                    
+                            
+                            # Terminate Provisioned Product pp_id
+                            response = sc_client.terminate_provisioned_product(
+                                ProvisionedProductId=pp_id
+                            )
+                            
+                            logging.info(f"Response of terminate_provisioned_product: {response}")
+                        else:
+                           logging.info(f'No provisioned product found for id: {pp_id}')   
+                        
+                except Exception as e:
+                    print('Error:', str(e))
+                    return {
+                        'statusCode': 500,
+                        'body': json.dumps('Error: ' + str(e))
+                    }

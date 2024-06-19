@@ -1,0 +1,7 @@
+{
+  "Parameters": {
+   "Environment" : "production",
+   "ApplicationName" : "hotfixpoc",
+   "RegistryAccountid" : "<prodaccountnumber>"
+ }
+}

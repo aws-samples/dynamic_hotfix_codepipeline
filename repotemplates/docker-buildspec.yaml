@@ -1,0 +1,23 @@
+version: 0.2
+env:
+  exported-variables:
+    - COMMIT_ID
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to Amazon ECR aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+      - COMMIT_ID=$(echo ${CODEBUILD_RESOLVED_SOURCE_VERSION} | tail -c 8)
+      - echo "[INFO] New COMMIT_ID is :" $COMMIT_ID
+  build:
+    commands:
+      - REPOSITORY_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPOSITORY_NAME"
+      - echo Build started on `date`
+      - echo Building the Docker image...
+      - docker build -t $REPOSITORY_NAME:$COMMIT_ID .
+      - docker tag $REPOSITORY_NAME:$COMMIT_ID $REPOSITORY_URI:$COMMIT_ID
+  post_build:
+    commands:
+      - echo Pushing the Docker image...
+      - docker push $REPOSITORY_URI:$COMMIT_ID
+      - echo Build completed on `date`

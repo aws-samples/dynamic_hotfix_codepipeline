@@ -1,0 +1,7 @@
+{
+  "Parameters": {
+   "Environment" : "stage",
+   "ApplicationName" : "hotfixpoc",
+   "RegistryAccountid" : "<stageaccountnumber>"
+ }
+}

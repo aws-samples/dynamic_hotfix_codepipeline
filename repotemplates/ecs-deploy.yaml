@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description:  This template creates ECR, ECS Cluster, Task Definition and Fargate Service
+
+Parameters:
+  ApplicationName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: hotfixpoc
+  VpcID:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Select a VPC that allows instances to access the Internet.
+    Default: /vpc/id
+  ECSPrivateSubnet1:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Select two private subnets in your selected VPC.
+    Default: /subnets/private1
+  ECSPrivateSubnet2:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Select two private subnets in your selected VPC.
+    Default: /subnets/private1
+  LBSecurityGroup:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Load Balancer security group to allow traffic to ECS Service
+    Default: /alb/sg
+  RegistryAccountid:
+    Type: String
+    Description: Account id that has the ECR setup
+  EcrRepoName:
+    Type: String
+    Description: ECR Repository name
+  Environment:
+    Type: String
+    Description: Environment information    
+  ImageTag:
+    Type: String
+    Description: Application image name that has to be used for setup.
+  ContainerPort:
+    Type: Number
+    Default: 80
+  TargetGroup1:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Register ECS Service with Target Group of ALB
+    Default: /alb/tg1
+
+Resources:
+  ECSServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+                - ecs-tasks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+                  - 'elasticloadbalancing:DeregisterTargets'
+                  - 'elasticloadbalancing:Describe*'
+                  - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+                  - 'elasticloadbalancing:RegisterTargets'
+                Resource: "arn:aws:elasticloadbalancing::*:*"
+              - Effect: Allow
+                Action:
+                  - 'ec2:Describe*'
+                  - 'ec2:AuthorizeSecurityGroupIngress'
+                Resource: "arn:aws:ec2::*:*"
+
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+     cfn_nag:
+      rules_to_suppress:
+       - id: W28
+         reason: "Resource names are constructed using application name parameter for tracking"    
+    Properties:
+      RoleName: !Join ['', [!Ref ApplicationName, ExecutionRole]]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+              - ecs-tasks.amazonaws.com
+              - ecs.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS'
+        - 'arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly'
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+        - 'arn:aws:iam::aws:policy/ElasticLoadBalancingFullAccess'
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Metadata:
+     cfn_nag:
+      rules_to_suppress:
+       - id: W84
+         reason: "The cloudwatch log group does not store any confidential data. It has only access log."
+       - id: W28
+         reason: "Resource names are constructed using application name parameter for tracking"      
+    Properties:
+      LogGroupName: !Join ['', [/ecs/, !Ref ApplicationName]]
+      RetentionInDays: 3
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Sub ${ApplicationName}-Cluster
+      #CapacityProviders: FARGATE
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroup
+    Properties:
+      # awsvpc is required for Fargate
+      Family: !Ref ApplicationName
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 0.5GB
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref ApplicationName
+          Image: !Sub "${RegistryAccountid}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepoName}:${ImageTag}"
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          # Send logs to CloudWatch Logs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: ecs
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub ${ApplicationName}-Service-${Environment}
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      HealthCheckGracePeriodSeconds: 30
+      LaunchType: FARGATE
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          # change to DISABLED if you're using private subnets that have access to a NAT gateway
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !Ref ECSPrivateSubnet1
+            - !Ref ECSPrivateSubnet2
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Ref ApplicationName
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup1
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+     cfn_nag:
+      rules_to_suppress:
+       - id: F1000
+         reason: "Egress rule is required to allow traffic from container to AWS Service endpoints"      
+    Properties:
+      GroupDescription: !Join ['', [!Ref ApplicationName, ContainerSecurityGroup]]
+      VpcId: !Ref VpcID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref LBSecurityGroup
+          Description: "Ingress rule to allow traffic from load balancer security group"
+Outputs:
+  ECSCluster:
+    Description: ECS Cluster name
+    Value: !Ref ECSCluster
+  ECSService:
+    Description: ECS Service name
+    Value: !GetAtt Service.Name
+

@@ -1,0 +1,583 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates a codepipeline setup to deploy Hotfix changes
+
+Parameters:
+  ArtifactBucketName:
+    Description: Bucket name to use for artifacts. It will be suffixed with respective region name.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /parameter/s3/artifactbucket/name
+  ApplicationName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: hotfixpoc
+  CodeCommitRepoName:
+    Type: String
+    Description: CodeCommit repository name that will be used for build project
+  StageAccount:
+    Description: AWS AccountNumber for Stage Account
+    Type: Number
+  ProdAccount:
+    Description: AWS AccountNumber for Production Account
+    Type: Number
+  ToolsAccount:
+    Description: AWS AccountNumber for Tools Account
+    Type: Number
+  ArtifactEncryptionKeyARN:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /parameter/kms/cmk/arn
+    Description: CMK Arn used for encryption and decrytion of artifacts
+  ArtifactEncryptionKeyId:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /parameter/kms/cmk/id
+    Description: CMK Arn used for encryption and decrytion of artifacts
+  ECRRepository:
+    Type: String
+    Description: ECR Repository Name
+  CodecommitBranchName:  
+    Type: String
+    Description: Codecommit repository branch name used in Codepipeline
+  CodeBuildImage:
+    Type: String
+    Description: AWS Codebuild machine type used for building the packages.
+    Default: "aws/codebuild/standard:7.0"
+  PRCreationLambdaFunction:
+    Type: String
+    Default: prcreation-lambda
+
+Resources:
+  BuildProjectLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:  !Sub "codebuild-loggroup-${CodecommitBranchName}-${ApplicationName}"            
+      RetentionInDays: 60
+      KmsKeyId: !Ref ArtifactEncryptionKeyARN
+
+  CfnPackage:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildPolicy
+    Properties:
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Description: Build to verify CFN template
+      Artifacts:
+        Type: CODEPIPELINE
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref BuildProjectLogsGroup
+          Status: ENABLED
+      EncryptionKey: !Ref ArtifactEncryptionKeyARN    
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref CodeBuildImage
+        EnvironmentVariables:
+          - Name: REGION
+            Value: !Ref "AWS::Region"
+          - Name: BUCKET
+            Value: !Ref ArtifactBucketName
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref "AWS::AccountId"
+          - Name: REPOSITORY_NAME
+            Value: !Ref ECRRepository
+          - Name: BRANCH_NAME
+            Value: !Ref CodecommitBranchName
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: cfn-buildspec.yaml
+      Cache:
+        Type: LOCAL
+        Modes: 
+          - LOCAL_CUSTOM_CACHE
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+
+  DockerBuild:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildPolicy
+    Properties:
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Description: Build to create a docker image and push that to ECR repository
+      Artifacts:
+        Type: CODEPIPELINE
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref BuildProjectLogsGroup
+          Status: ENABLED
+      EncryptionKey: !Ref ArtifactEncryptionKeyARN    
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref CodeBuildImage
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_REGION
+            Value: !Ref "AWS::Region"
+            Type: PLAINTEXT            
+          - Name: BUCKET
+            Value: !Ref ArtifactBucketName
+            Type: PLAINTEXT            
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref "AWS::AccountId"
+            Type: PLAINTEXT
+          - Name: BRANCH_NAME
+            Value: !Ref CodecommitBranchName          
+          - Name: REPOSITORY_NAME
+            Value: !Ref ECRRepository
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: docker-buildspec.yaml
+      Cache:
+        Type: LOCAL
+        Modes: 
+          - LOCAL_CUSTOM_CACHE
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Metadata:
+       cfn_nag:
+        rules_to_suppress:
+        - id: W28
+          reason: "Resource names are constructed using application name parameter for tracking"      
+    Properties:
+      RoleName: !Sub ${ApplicationName}-${CodecommitBranchName}-codebuild-role 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess' 
+
+  CodeBuildPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName:  !Sub ${ApplicationName}-${CodecommitBranchName}-codebuild-policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetBucketPolicy
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${ArtifactBucketName}/*"
+              - !Sub "arn:aws:s3:::${ArtifactBucketName}"
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource: !Ref ArtifactEncryptionKeyARN
+          - Sid: CloudWatchLogsPolicy 
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub "arn:aws:logs:${AWS::Region}:*:*"
+          - Sid: CodeCommitPolicy
+            Effect: Allow
+            Action:
+              - "codecommit:ListBranches"
+              - "codecommit:ListRepositories"
+              - "codecommit:BatchGetRepositories"
+              - "codecommit:Get*"
+              - "codecommit:GitPull"
+            Resource:
+              - !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:codecommit/*"
+          - Sid: CodeBuildECR
+            Effect: Allow
+            Action:
+            - ecr:BatchGetImage
+            - ecr:GetDownloadUrlForLayer
+            - ecr:BatchCheckLayerAvailability
+            - ecr:CompleteLayerUpload
+            - ecr:GetAuthorizationToken
+            - ecr:InitiateLayerUpload
+            - ecr:PutImage
+            - ecr:UploadLayerPart
+            Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:*"          
+      Roles:
+        - !Ref CodeBuildRole
+
+  CodePipelineRole:
+    Type: "AWS::IAM::Role"
+    Metadata:
+       cfn_nag:
+        rules_to_suppress:
+        - id: W28
+          reason: "Resource names are constructed using application name parameter for tracking"      
+    Properties:
+      RoleName:
+        Fn::Sub: ${ApplicationName}-${CodecommitBranchName}-codepipeline-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+        -
+          PolicyName: "CodePipelineAccessPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+                - Action:
+                    - 'iam:PassRole'
+                  Resource: "arn:aws:iam::*:*"
+                  Effect: Allow
+                  Condition:
+                    StringEqualsIfExists:
+                      'iam:PassedToService':
+                        - cloudformation.amazonaws.com
+                        - ecs-tasks.amazonaws.com
+                - Action:
+                    - 'codecommit:CancelUploadArchive'
+                    - 'codecommit:GetBranch'
+                    - 'codecommit:GetCommit'
+                    - 'codecommit:GetRepository'
+                    - 'codecommit:GetUploadArchiveStatus'
+                    - 'codecommit:UploadArchive'
+                  Resource: !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:*"
+                  Effect: Allow
+                - Action:
+                   - elasticloadbalancing:Create*
+                   - elasticloadbalancing:Delete*
+                   - elasticloadbalancing:Describe*
+                   - elasticloadbalancing:Modify*
+                   - elasticloadbalancing:Register*
+                   - elasticloadbalancing:Deregister*
+                  Resource: 
+                  - !Sub "arn:aws:elasticloadbalancing:${AWS::Region}:${StageAccount}:*"
+                  - !Sub "arn:aws:elasticloadbalancing:${AWS::Region}:${ProdAccount}:*"
+                  Effect: Allow
+                - Action:
+                   - s3:Create*
+                   - s3:Get*
+                   - s3:Put*
+                   - s3:Delete*
+                   - s3:Update*
+                  Resource: "arn:aws:s3::*:*"
+                  Effect: Allow
+                - Action:
+                   - ecs:Create*
+                   - ecs:Delete*
+                   - ecs:Describe*
+                   - ecs:List*
+                   - ecs:Register*
+                   - ecs:Run*
+                   - ecs:Stop*
+                   - ecs:Start*
+                   - ecs:Deregister*
+                  Resource: 
+                  - !Sub "arn:aws:ecs:${AWS::Region}:${ProdAccount}:*"
+                  - !Sub "arn:aws:ecs:${AWS::Region}:${StageAccount}:*"
+                  Effect: Allow
+                - Action:
+                    - 'cloudformation:CreateStack'
+                    - 'cloudformation:DeleteStack'
+                    - 'cloudformation:DescribeStacks'
+                    - 'cloudformation:UpdateStack'
+                    - 'cloudformation:CreateChangeSet'
+                    - 'cloudformation:DeleteChangeSet'
+                    - 'cloudformation:DescribeChangeSet'
+                    - 'cloudformation:ExecuteChangeSet'
+                    - 'cloudformation:SetStackPolicy'
+                    - 'cloudformation:ValidateTemplate'
+                  Resource: 
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${StageAccount}:*"
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${ProdAccount}:*"
+                  Effect: Allow
+                - Action:
+                    - 'codebuild:BatchGetBuilds'
+                    - 'codebuild:StartBuild'
+                    - 'codebuild:BatchGetBuildBatches'
+                    - 'codebuild:StartBuildBatch'
+                  Resource: 
+                  - !Sub "arn:aws:codebuild:${AWS::Region}:${ToolsAccount}:project/*"
+                  Effect: Allow
+                - Effect: Allow
+                  Action:
+                    - 'ecr:DescribeImages'
+                    - 'ecr:GetAuthorizationToken'
+                  Resource: 
+                  - !Sub "arn:aws:ecr:${AWS::Region}:${ToolsAccount}:repository/*"
+                -
+                  Effect: Allow
+                  Action:
+                    - 'sts:AssumeRole'
+                  Resource:
+                  - !Sub arn:aws:iam::${StageAccount}:role/${ApplicationName}-codepipeline-role
+                  - !Sub arn:aws:iam::${ProdAccount}:role/${ApplicationName}-codepipeline-role
+                -
+                  Effect: Allow
+                  Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  Resource:
+                  - !Ref ArtifactEncryptionKeyARN
+                - Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                  Resource:
+                    - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${PRCreationLambdaFunction}"                 
+
+  CodePipelinePipeline:
+      Type: "AWS::CodePipeline::Pipeline"
+      DependsOn: CodePipelineRole
+      Properties:
+          Name: !Sub ${ApplicationName}-${CodecommitBranchName}-pipeline
+          RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${ApplicationName}-${CodecommitBranchName}-codepipeline-role
+          ArtifactStores:
+              - Region: !Sub ${AWS::Region}
+                ArtifactStore:
+                  Type: S3
+                  Location: !Ref ArtifactBucketName
+                  EncryptionKey:
+                    Id: !Ref ArtifactEncryptionKeyARN
+                    Type: KMS
+          Stages:
+            -
+              Name: "Source"
+              Actions:
+                -
+                  Name: "Source"
+                  ActionTypeId:
+                      Category: "Source"
+                      Owner: "AWS"
+                      Provider: "CodeCommit"
+                      Version: "1"
+                  Configuration:
+                      BranchName: !Ref CodecommitBranchName
+                      OutputArtifactFormat: "CODE_ZIP"
+                      PollForSourceChanges: "false"
+                      RepositoryName: !Ref CodeCommitRepoName
+                  OutputArtifacts:
+                    -
+                      Name: "SourceArtifact"
+                  Region: !Ref AWS::Region
+                  Namespace: "SourceVariables"
+                  RunOrder: 1
+            -
+              Name: "Build"
+              Actions:
+                -
+                  Name: "ECSBuild"
+                  ActionTypeId:
+                      Category: "Build"
+                      Owner: "AWS"
+                      Provider: "CodeBuild"
+                      Version: "1"
+                  Configuration:
+                      ProjectName: !Ref DockerBuild
+                  InputArtifacts:
+                    -
+                      Name: "SourceArtifact"
+                  OutputArtifacts:
+                    -
+                      Name: "BuildArtifact1"
+                  Namespace: "BuildVariables1"
+                  RunOrder: 2
+                -
+                  Name: "CFNBuild"
+                  ActionTypeId:
+                      Category: "Build"
+                      Owner: "AWS"
+                      Provider: "CodeBuild"
+                      Version: "1"
+                  Configuration:
+                      ProjectName: !Ref CfnPackage
+                  InputArtifacts:
+                    -
+                      Name: "SourceArtifact"
+                  OutputArtifacts:
+                    -
+                      Name: "CfnPackageArtifact"
+                  Namespace: "BuildVariables2"
+                  RunOrder: 1
+            -
+              Name: "StageDeploy"
+              Actions:
+                -
+                  Name: "Stage-ChangeSetCreation"
+                  ActionTypeId:
+                      Category: Deploy
+                      Owner: AWS
+                      Provider: CloudFormation
+                      Version: 1
+                  Configuration:
+                      ActionMode: CHANGE_SET_REPLACE
+                      ChangeSetName: !Sub "${ApplicationName}-stage-changeset"
+                      StackName: !Sub "${ApplicationName}-stage"
+                      Capabilities: CAPABILITY_AUTO_EXPAND,CAPABILITY_NAMED_IAM
+                      TemplatePath: "CfnPackageArtifact::ecs-deploy.yaml"
+                      TemplateConfiguration: "CfnPackageArtifact::ecs-configuration-stage.yaml"
+                      ParameterOverrides: !Sub >- 
+                        {"EcrRepoName": "${ECRRepository}",
+                        "ApplicationName": "${ApplicationName}",
+                        "ImageTag": "#{BuildVariables1.COMMIT_ID}"}
+                      RoleArn: !Sub arn:aws:iam::${StageAccount}:role/${ApplicationName}-codepipeline-role
+                  InputArtifacts:
+                    -
+                      Name: "CfnPackageArtifact"
+                  RunOrder: 1
+                  RoleArn: !Sub arn:aws:iam::${StageAccount}:role/${ApplicationName}-codepipeline-role
+                -
+                  Name: "Stage-ChangeSetExecution"
+                  ActionTypeId:
+                      Category: Deploy
+                      Owner: AWS
+                      Provider: CloudFormation
+                      Version: 1
+                  Configuration:
+                      ActionMode: CHANGE_SET_EXECUTE
+                      ChangeSetName: !Sub "${ApplicationName}-stage-changeset"
+                      StackName: !Sub "${ApplicationName}-stage"
+                      RoleArn: !Sub arn:aws:iam::${StageAccount}:role/${ApplicationName}-codepipeline-role
+                  InputArtifacts:
+                    -
+                      Name: "CfnPackageArtifact"
+                  RunOrder: 5
+                  RoleArn: !Sub arn:aws:iam::${StageAccount}:role/${ApplicationName}-codepipeline-role
+            - 
+              Name: CreatePRtodevmainbranch
+              Actions:
+                - Name: InvokeLambdatoCreatePR
+                  InputArtifacts:
+                    - Name: CfnPackageArtifact
+                  ActionTypeId:
+                    Category: Invoke
+                    Owner: AWS
+                    Provider: Lambda
+                    Version: '1'
+                  Configuration:
+                    FunctionName: !Ref PRCreationLambdaFunction
+                    UserParameters: !Sub
+                    - "{\"Title\": \"PR created from branch ${CodecommitBranchName}\", \"Description\": \"Created by Lambda function for branch ${CodecommitBranchName} \", \"ClientToken\": \"${CodecommitBranchName}-${RandomGUID}\", \"Repository\": \"${CodeCommitRepoName}\", \"Sourcebranch\": \"${CodecommitBranchName}\"}"
+                    - RandomGUID: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref "AWS::StackId" ]]]]    
+            - 
+              Name: Approval
+              Actions:
+                - Name: ApprovalToStart
+                  ActionTypeId:
+                    Category: Approval
+                    Owner: AWS
+                    Version: 1
+                    Provider: Manual
+                  Configuration:
+                    CustomData: Approval required to start deployment to Production Environments.
+                  RunOrder: 30      
+            -
+              Name: "ProdDeploy"
+              Actions:
+                -
+                  Name: "Prod-ChangeSetCreation"
+                  ActionTypeId:
+                      Category: Deploy
+                      Owner: AWS
+                      Provider: CloudFormation
+                      Version: 1
+                  Configuration:
+                      ActionMode: CHANGE_SET_REPLACE
+                      ChangeSetName: !Sub "${ApplicationName}-prod-changeset"
+                      StackName: !Sub "${ApplicationName}-prod"
+                      Capabilities: CAPABILITY_AUTO_EXPAND,CAPABILITY_NAMED_IAM
+                      TemplatePath: "CfnPackageArtifact::ecs-deploy.yaml"
+                      TemplateConfiguration: "CfnPackageArtifact::ecs-configuration-prod.yaml"
+                      ParameterOverrides: !Sub >- 
+                        {"EcrRepoName": "${ECRRepository}",
+                        "ApplicationName": "${ApplicationName}",
+                        "ImageTag": "#{BuildVariables1.COMMIT_ID}"}
+                      RoleArn: !Sub arn:aws:iam::${ProdAccount}:role/${ApplicationName}-codepipeline-role
+                  InputArtifacts:
+                    -
+                      Name: "CfnPackageArtifact"
+                  RunOrder: 1
+                  RoleArn: !Sub arn:aws:iam::${ProdAccount}:role/${ApplicationName}-codepipeline-role
+                -
+                  Name: "Prod-ChangeSetExecution"
+                  ActionTypeId:
+                      Category: Deploy
+                      Owner: AWS
+                      Provider: CloudFormation
+                      Version: 1
+                  Configuration:
+                      ActionMode: CHANGE_SET_EXECUTE
+                      ChangeSetName: !Sub "${ApplicationName}-prod-changeset"
+                      StackName: !Sub "${ApplicationName}-prod"
+                      RoleArn: !Sub arn:aws:iam::${ProdAccount}:role/${ApplicationName}-codepipeline-role
+                  InputArtifacts:
+                    -
+                      Name: "CfnPackageArtifact"
+                  RunOrder: 5
+                  RoleArn: !Sub arn:aws:iam::${ProdAccount}:role/${ApplicationName}-codepipeline-role                  
+
+  CloudwatchEventRole:
+    Type: AWS::IAM::Role
+    Metadata:
+       cfn_nag:
+        rules_to_suppress:
+        - id: W28
+          reason: "Resource names are constructed using application name parameter for tracking"      
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${CodeCommitRepoName}-${CodecommitBranchName}"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+               - Effect: Allow
+                 Action: codepipeline:StartPipelineExecution
+                 Resource: !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref CodePipelinePipeline ] ]
+  
+  PipelineEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ApplicationName}-${CodeCommitRepoName}-${CodecommitBranchName}"
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - 'CodeCommit Repository State Change'
+        resources:
+          - !Join [ '', [ 'arn:aws:codecommit:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref CodeCommitRepoName ] ]
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref CodecommitBranchName
+      Targets:
+        -
+          Arn: 
+            !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref CodePipelinePipeline ] ]
+          RoleArn: !GetAtt CloudwatchEventRole.Arn
+          Id: CodePipelinePipeline-Pipeline                       
